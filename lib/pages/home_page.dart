@@ -8,6 +8,9 @@ import 'dart:io';
 import 'package:cloudinary/cloudinary.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:ui';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 
 class HeroInfo {
   final String name;
@@ -32,16 +35,32 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin {
   final ImagePicker _picker = ImagePicker();
   final _formKey = GlobalKey<FormState>();
+  late AnimationController _controller;
+  late Animation<double> _fadeAnimation;
   
   // Form controllers
   final _reporterNameController = TextEditingController();
   final _contactNumberController = TextEditingController();
   final _landmarkController = TextEditingController();
-  String _selectedAnimalType = 'Dog'; // Default value
-  
+  final _descriptionController = TextEditingController();
+  String _selectedAnimalType = 'Dog';
+  String _selectedLanguage = 'en-US';
+  final FlutterTts flutterTts = FlutterTts();
+  bool _isTrafficAccident = false;
+  bool _isAnimalAggressive = false;
+  String? _currentPhotoUrl;
+  bool _isLoading = false;
+
+  // Initialize Cloudinary
+  final cloudinary = Cloudinary.signedConfig(
+    apiKey: '563881842238764',
+    apiSecret: 'EKBvQcavtdBakegu0LMVgI42FQQ',
+    cloudName: 'dlwtrimk6',
+  );
+
   static const List<HeroInfo> heroes = [
     HeroInfo(
       name: 'Dr. Rajesh Kumar',
@@ -63,12 +82,27 @@ class _HomePageState extends State<HomePage> {
     ),
   ];
 
-  // Initialize Cloudinary
-  final cloudinary = Cloudinary.signedConfig(
-    apiKey: '563881842238764',
-    apiSecret: 'EKBvQcavtdBakegu0LMVgI42FQQ',
-    cloudName: 'dlwtrimk6',
-  );
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      duration: const Duration(seconds: 2),
+      vsync: this,
+    );
+    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(_controller);
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _speak(String text) async {
+    await flutterTts.setLanguage(_selectedLanguage);
+    await flutterTts.speak(text);
+  }
 
   Future<String?> _uploadToCloudinary(XFile photo) async {
     try {
@@ -76,12 +110,12 @@ class _HomePageState extends State<HomePage> {
         file: photo.path,
         fileBytes: await photo.readAsBytes(),
         resourceType: CloudinaryResourceType.image,
-        folder: 'animal_reports', // Optional: organize images in a folder
-        fileName: 'report_${DateTime.now().millisecondsSinceEpoch}', // Unique filename
+        folder: 'animal_reports',
+        fileName: 'report_${DateTime.now().millisecondsSinceEpoch}',
       );
 
       if (response.isSuccessful) {
-        return response.secureUrl;  // Returns the HTTPS URL of the uploaded image
+        return response.secureUrl;
       }
       return null;
     } catch (e) {
@@ -91,48 +125,49 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _takePicture() async {
-    final XFile? photo = await _picker.pickImage(source: ImageSource.camera);
+    setState(() => _isLoading = true);
     
-    if (photo != null && mounted) {
-      // Show confirmation dialog
-      showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            content: Image.file(File(photo.path)),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel'),
-              ),
-              TextButton(
-                onPressed: () async {
-                  Navigator.pop(context);
-                  // Upload to Cloudinary before showing the form
-                  final String? imageUrl = await _uploadToCloudinary(photo);
-                  if (imageUrl != null) {
-                    _showReportForm(photo, imageUrl);
-                  } else {
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Failed to upload image'),
-                          backgroundColor: Colors.red,
-                        ),
-                      );
-                    }
-                  }
-                },
-                child: const Text('Confirm'),
-              ),
-            ],
-          );
-        },
+    try {
+      final XFile? photo = await _picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 70,
+        maxWidth: 1920,
       );
+      
+      if (photo != null && mounted) {
+        final String? imageUrl = await _uploadToCloudinary(photo);
+        if (imageUrl != null) {
+          setState(() => _currentPhotoUrl = imageUrl);
+          _showReportForm();
+        } else {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Failed to upload image'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      print('Error taking picture: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Error taking picture'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
-  Future<void> _showReportForm(XFile photo, String imageUrl) async {
+  Future<void> _showReportForm() async {
     // Get current location
     Position position;
     try {
@@ -167,17 +202,17 @@ class _HomePageState extends State<HomePage> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // Display uploaded image
-                  Container(
-                    height: 150,
-                    decoration: BoxDecoration(
-                      image: DecorationImage(
-                        image: NetworkImage(imageUrl),
-                        fit: BoxFit.cover,
+                  if (_currentPhotoUrl != null)
+                    Container(
+                      height: 150,
+                      decoration: BoxDecoration(
+                        image: DecorationImage(
+                          image: NetworkImage(_currentPhotoUrl!),
+                          fit: BoxFit.cover,
+                        ),
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                      borderRadius: BorderRadius.circular(8),
                     ),
-                  ),
                   const SizedBox(height: 16),
                   TextFormField(
                     controller: _reporterNameController,
@@ -225,6 +260,36 @@ class _HomePageState extends State<HomePage> {
                       return null;
                     },
                   ),
+                  TextFormField(
+                    controller: _descriptionController,
+                    decoration: const InputDecoration(labelText: 'Description *'),
+                    maxLines: 3,
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'Please enter a description';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  CheckboxListTile(
+                    title: const Text('Traffic Accident'),
+                    value: _isTrafficAccident,
+                    onChanged: (value) {
+                      setState(() {
+                        _isTrafficAccident = value ?? false;
+                      });
+                    },
+                  ),
+                  CheckboxListTile(
+                    title: const Text('Animal is Aggressive'),
+                    value: _isAnimalAggressive,
+                    onChanged: (value) {
+                      setState(() {
+                        _isAnimalAggressive = value ?? false;
+                      });
+                    },
+                  ),
                   const SizedBox(height: 16),
                   Text(
                     'Location: ${position.latitude}, ${position.longitude}',
@@ -244,9 +309,26 @@ class _HomePageState extends State<HomePage> {
               child: const Text('Cancel'),
             ),
             TextButton(
-              onPressed: () {
+              onPressed: () async {
                 if (_formKey.currentState!.validate()) {
-                  // TODO: Save the report with the imageUrl
+                  final report = AnimalReport(
+                    reporterName: _reporterNameController.text,
+                    contactNumber: _contactNumberController.text,
+                    latitude: position.latitude,
+                    longitude: position.longitude,
+                    reportTime: DateTime.now(),
+                    address: '${position.latitude}, ${position.longitude}',
+                    landmark: _landmarkController.text,
+                    animalType: _selectedAnimalType,
+                    description: _descriptionController.text,
+                    photoUrls: _currentPhotoUrl != null ? [_currentPhotoUrl!] : [],
+                    isTrafficAccident: _isTrafficAccident,
+                    isAnimalAggressive: _isAnimalAggressive,
+                  );
+
+                  // TODO: Send report to your backend
+                  print('Report data: ${jsonEncode(report.toJson())}');
+
                   Navigator.pop(context);
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
@@ -254,6 +336,17 @@ class _HomePageState extends State<HomePage> {
                       backgroundColor: Colors.green,
                     ),
                   );
+
+                  // Clear form
+                  _reporterNameController.clear();
+                  _contactNumberController.clear();
+                  _landmarkController.clear();
+                  _descriptionController.clear();
+                  setState(() {
+                    _currentPhotoUrl = null;
+                    _isTrafficAccident = false;
+                    _isAnimalAggressive = false;
+                  });
                 }
               },
               child: const Text('Submit'),
@@ -264,385 +357,345 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  String _selectedLanguage = 'en-US';
-  
-  final List<String> languages = [
-    'English',
-    'हिंदी (Hindi)',
-    'मराठी (Marathi)',
-    'தமிழ் (Tamil)',
-    'తెలుగు (Telugu)',
-    'বাংলা (Bengali)',
-    'ગુજરાતી (Gujarati)',
-    'ਪੰਜਾਬੀ (Punjabi)',
-    'ಕನ್ನಡ (Kannada)',
-    'മലയാളം (Malayalam)',
-    'ଓଡ଼ିଆ (Odia)',
-  ];
-
-  String _getLanguageCode(String language) {
-    switch (language) {
-      case 'हिंदी (Hindi)':
-        return 'hi-IN';
-      case 'मराठी (Marathi)':
-        return 'mr-IN';
-      case 'தமிழ் (Tamil)':
-        return 'ta-IN';
-      case 'తెలుగు (Telugu)':
-        return 'te-IN';
-      case 'বাংলা (Bengali)':
-        return 'bn-IN';
-      case 'ગુજરાતી (Gujarati)':
-        return 'gu-IN';
-      case 'ਪੰਜਾਬੀ (Punjabi)':
-        return 'pa-IN';
-      case 'ಕನ್ನಡ (Kannada)':
-        return 'kn-IN';
-      case 'മലയാളം (Malayalam)':
-        return 'ml-IN';
-      case 'ଓଡ଼ିଆ (Odia)':
-        return 'or-IN';
-      default:
-        return 'en-US';
-    }
-  }
-
-  Future<void> _updateLanguage(String language) async {
-    final String langCode = _getLanguageCode(language);
-    setState(() {
-      _selectedLanguage = langCode;
-    });
-    // Optionally save selected language to SharedPreferences
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('selectedLanguage', langCode);
-  }
-
-  Future<void> _speak(String text) async {
-    final FlutterTts flutterTts = FlutterTts();
-    await flutterTts.setLanguage(_selectedLanguage);
-    await flutterTts.speak(text);
-  }
-
-  void _showLanguageDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('Select Language'),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView(
-              shrinkWrap: true,
-              children: languages.map((String language) {
-                return ListTile(
-                  title: Text(language),
-                  onTap: () {
-                    _updateLanguage(language);
-                    Navigator.pop(context);
-                  },
-                  trailing: _getLanguageCode(language) == _selectedLanguage
-                      ? const Icon(Icons.check, color: Color(0xFF4B5EFC))
-                      : null,
-                );
-              }).toList(),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: SingleChildScrollView(
-        child: Column(
-          children: [
-            // Upper Half with Background Image
-            Container(
-              height: MediaQuery.of(context).size.height * 0.35,
-              decoration: const BoxDecoration(
-                image: DecorationImage(
-                  image: AssetImage('assets/background.jpg'), // This should match your pubspec.yaml declaration
-                  fit: BoxFit.cover,
-                  colorFilter: ColorFilter.mode(
-                    Colors.black26,
-                    BlendMode.darken,
-                  ),
+      body: Stack(
+        children: [
+          // Beautiful gradient background with pattern
+          Positioned.fill(
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    Theme.of(context).primaryColor.withOpacity(0.9),
+                    Theme.of(context).primaryColor.withOpacity(0.7),
+                    Theme.of(context).colorScheme.secondary.withOpacity(0.8),
+                  ],
                 ),
               ),
-              child: Stack(
+              child: CustomPaint(
+                painter: BackgroundPatternPainter(),
+              ),
+            ),
+          ),
+          // Content
+          SingleChildScrollView(
+            child: FadeTransition(
+              opacity: _fadeAnimation,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Carousel with updated styling
-                  Positioned(
-                    bottom: 20,
-                    left: 0,
-                    right: 0,
-                    child: CarouselSlider(
-                      options: CarouselOptions(
-                        height: MediaQuery.of(context).size.height * 0.22,
-                        autoPlay: true,
-                        enlargeCenterPage: true,
-                        viewportFraction: 0.85,
-                        autoPlayAnimationDuration: const Duration(seconds: 1),
-                      ),
-                      items: heroes.map((hero) {
-                        return Builder(
-                          builder: (BuildContext context) {
-                            return Card(
-                              elevation: 8,
-                              shadowColor: Colors.black38,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(20),
+                  const SizedBox(height: 60),
+                  // Welcome Text with Animations
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        TweenAnimationBuilder(
+                          tween: Tween<double>(begin: -50, end: 0),
+                          duration: const Duration(milliseconds: 1000),
+                          builder: (context, double value, child) {
+                            return Transform.translate(
+                              offset: Offset(value, 0),
+                              child: child,
+                            );
+                          },
+                          child: Text(
+                            'Welcome, ${widget.username}!',
+                            style: const TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.w500,
+                              color: Colors.white,
+                              fontStyle: FontStyle.italic,
+                              shadows: [
+                                Shadow(
+                                  color: Colors.black54,
+                                  offset: Offset(2, 2),
+                                  blurRadius: 4,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        TweenAnimationBuilder(
+                          tween: Tween<double>(begin: 50, end: 0),
+                          duration: const Duration(milliseconds: 1000),
+                          builder: (context, double value, child) {
+                            return Transform.translate(
+                              offset: Offset(value, 0),
+                              child: child,
+                            );
+                          },
+                          child: ShaderMask(
+                            shaderCallback: (bounds) => const LinearGradient(
+                              colors: [Colors.white, Color(0xFFE0C9A6)],
+                            ).createShader(bounds),
+                            child: const Text(
+                              'PASHU RAKSHAK',
+                              style: TextStyle(
+                                fontSize: 40,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                                letterSpacing: 2,
+                                shadows: [
+                                  Shadow(
+                                    color: Colors.black54,
+                                    offset: Offset(3, 3),
+                                    blurRadius: 6,
+                                  ),
+                                ],
                               ),
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(20),
-                                  gradient: LinearGradient(
-                                    begin: Alignment.topLeft,
-                                    end: Alignment.bottomRight,
-                                    colors: [
-                                      Colors.white,
-                                      Colors.grey.shade50,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 30),
+                  // Heroes Carousel with Glass Effect
+                  CarouselSlider(
+                    options: CarouselOptions(
+                      height: 200,
+                      autoPlay: true,
+                      enlargeCenterPage: true,
+                      viewportFraction: 0.85,
+                      autoPlayAnimationDuration: const Duration(seconds: 1),
+                    ),
+                    items: heroes.map((hero) {
+                      return Builder(
+                        builder: (BuildContext context) {
+                          return Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 5),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.9),
+                              borderRadius: BorderRadius.circular(15),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.2),
+                                  blurRadius: 10,
+                                  spreadRadius: 2,
+                                ),
+                              ],
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(15),
+                              child: BackdropFilter(
+                                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(20),
+                                  child: Row(
+                                    children: [
+                                      CircleAvatar(
+                                        radius: 35,
+                                        backgroundColor: Theme.of(context).primaryColor.withOpacity(0.1),
+                                        child: Icon(
+                                          hero.icon,
+                                          size: 35,
+                                          color: Theme.of(context).primaryColor,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 20),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          mainAxisAlignment: MainAxisAlignment.center,
+                                          children: [
+                                            Text(
+                                              hero.name,
+                                              style: TextStyle(
+                                                fontSize: 20,
+                                                fontWeight: FontWeight.bold,
+                                                color: Theme.of(context).primaryColor,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              hero.description,
+                                              style: TextStyle(
+                                                fontSize: 16,
+                                                color: Colors.grey[700],
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              hero.achievement,
+                                              style: TextStyle(
+                                                fontSize: 14,
+                                                color: Theme.of(context).primaryColor,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
                                     ],
                                   ),
                                 ),
-                                padding: const EdgeInsets.all(20),
-                                child: Row(
+                              ),
+                            ),
+                          );
+                        },
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 30),
+                  // Report Animal Section with Glass Effect
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.9),
+                        borderRadius: BorderRadius.circular(15),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.2),
+                            blurRadius: 10,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(15),
+                        child: BackdropFilter(
+                          filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                          child: Padding(
+                            padding: const EdgeInsets.all(20),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
                                   children: [
-                                    CircleAvatar(
-                                      radius: 35,
-                                      backgroundColor: Theme.of(context).primaryColor.withOpacity(0.1),
-                                      child: Icon(
-                                        hero.icon,
-                                        size: 35,
-                                        color: Theme.of(context).primaryColor,
-                                      ),
+                                    Icon(
+                                      Icons.pets,
+                                      color: Theme.of(context).primaryColor,
+                                      size: 30,
                                     ),
-                                    const SizedBox(width: 20),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        children: [
-                                          Text(
-                                            hero.name,
-                                            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                                                  fontWeight: FontWeight.bold,
-                                                ),
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            hero.description,
-                                            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                                                  color: Colors.grey[600],
-                                                ),
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text(
-                                            hero.achievement,
-                                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                                  color: Theme.of(context).primaryColor,
-                                                  fontWeight: FontWeight.w500,
-                                                ),
-                                          ),
-                                        ],
+                                    const SizedBox(width: 10),
+                                    Text(
+                                      'Report Animal',
+                                      style: TextStyle(
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.bold,
+                                        color: Theme.of(context).primaryColor,
                                       ),
                                     ),
                                   ],
                                 ),
-                              ),
-                            );
-                          },
-                        );
-                      }).toList(),
-                    ),
-                  ),
-                  
-                  // Top Actions with updated styling
-                  Positioned(
-                    top: 40,
-                    right: 16,
-                    child: Row(
-                      children: [
-                        Container(
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.9),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: IconButton(
-                            icon: const Icon(
-                              Icons.volume_up,
-                              color: Color(0xFF4B5EFC),
-                              size: 24,
+                                const SizedBox(height: 20),
+                                ElevatedButton(
+                                  onPressed: _isLoading ? null : _takePicture,
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Theme.of(context).primaryColor,
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(vertical: 15),
+                                    minimumSize: const Size(double.infinity, 50),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                  ),
+                                  child: _isLoading
+                                      ? const CircularProgressIndicator(color: Colors.white)
+                                      : const Row(
+                                          mainAxisAlignment: MainAxisAlignment.center,
+                                          children: [
+                                            Icon(Icons.camera_alt),
+                                            SizedBox(width: 10),
+                                            Text(
+                                              'Take a Photo to Report',
+                                              style: TextStyle(
+                                                fontSize: 16,
+                                                fontWeight: FontWeight.bold,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                ),
+                              ],
                             ),
-                            onPressed: () => _speak('Pashu Rakshak'),
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Container(
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.9),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: IconButton(
-                            icon: const Icon(
-                              Icons.language,
-                              color: Color(0xFF4B5EFC),
-                              size: 24,
-                            ),
-                            onPressed: () => _showLanguageDialog(context),
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
+                  const SizedBox(height: 30),
                 ],
-              ),
-            ),
-
-            // Lower Half with updated styling
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(30),
-                  topRight: Radius.circular(30),
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black12,
-                    blurRadius: 10,
-                    offset: const Offset(0, -5),
-                  ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(
-                        Icons.pets,
-                        color: Color(0xFF4B5EFC),
-                        size: 32,
-                      ),
-                      const SizedBox(width: 12),
-                      const Text(
-                        'Report Animal',
-                        style: TextStyle(
-                          fontSize: 28,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-                  Container(
-                    width: double.infinity,
-                    height: 60,
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(15),
-                      gradient: LinearGradient(
-                        colors: [
-                          Theme.of(context).primaryColor,
-                          Theme.of(context).primaryColor.withOpacity(0.8),
-                        ],
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Theme.of(context).primaryColor.withOpacity(0.3),
-                          blurRadius: 8,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: ElevatedButton.icon(
-                      onPressed: _takePicture,
-                      icon: const Icon(Icons.camera_alt, size: 28),
-                      label: const Text(
-                        'Report Animal in Need',
-                        style: TextStyle(fontSize: 18),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.transparent,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(15),
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Center(
-                    child: Text(
-                      'Take a photo to report',
-                      style: TextStyle(
-                        color: Colors.grey[600],
-                        fontSize: 14,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-      
-      // Emergency Call Button
-      floatingActionButton: Container(
-        margin: const EdgeInsets.only(left: 32),
-        child: Align(
-          alignment: Alignment.bottomLeft,
-          child: Material(
-            color: Colors.transparent,
-            child: InkWell(
-              borderRadius: BorderRadius.circular(28),
-              onTap: () async {
-                final Uri phoneUri = Uri.parse('tel:139');
-                try {
-                  if (await canLaunchUrl(phoneUri)) {
-                    await launchUrl(phoneUri);
-                  }
-                } catch (e) {
-                  // Handle error
-                }
-              },
-              child: Container(
-                width: 56,
-                height: 56,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.red,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.2),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.phone,
-                  color: Colors.white,
-                  size: 28,
-                ),
               ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }
+}
+
+class BackgroundPatternPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white.withOpacity(0.1)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+
+    for (var i = 0; i < size.width; i += 30) {
+      for (var j = 0; j < size.height; j += 30) {
+        canvas.drawCircle(Offset(i.toDouble(), j.toDouble()), 1, paint);
+      }
+    }
+  }
 
   @override
-  void dispose() {
-    _reporterNameController.dispose();
-    _contactNumberController.dispose();
-    _landmarkController.dispose();
-    super.dispose();
+  bool shouldRepaint(CustomPainter oldDelegate) => false;
+}
+
+// Report Model
+class AnimalReport {
+  final String reporterName;
+  final String contactNumber;
+  final double? latitude;
+  final double? longitude;
+  final DateTime reportTime;
+  final String address;
+  final String landmark;
+  final String animalType;
+  final String description;
+  final List<String> photoUrls;
+  final bool isTrafficAccident;
+  final bool isAnimalAggressive;
+
+  AnimalReport({
+    required this.reporterName,
+    required this.contactNumber,
+    this.latitude,
+    this.longitude,
+    required this.reportTime,
+    required this.address,
+    required this.landmark,
+    required this.animalType,
+    required this.description,
+    required this.photoUrls,
+    required this.isTrafficAccident,
+    required this.isAnimalAggressive,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'reporterName': reporterName,
+      'contactNumber': contactNumber,
+      'latitude': latitude,
+      'longitude': longitude,
+      'reportTime': reportTime.toIso8601String(),
+      'address': address,
+      'landmark': landmark,
+      'animalType': animalType,
+      'description': description,
+      'photoUrls': photoUrls,
+      'isTrafficAccident': isTrafficAccident,
+      'isAnimalAggressive': isAnimalAggressive,
+    };
   }
 } 
